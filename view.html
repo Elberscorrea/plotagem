@@ -1,0 +1,364 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Validação / Plotagem de Coordenadas</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    html,body,#map{height:100%;margin:0}
+    .panel{position:absolute;top:12px;left:12px;z-index:2;background:#fff;padding:10px;
+      border-radius:12px;box-shadow:0 6px 22px rgba(0,0,0,.14);font:14px/1.35 system-ui;
+      width:min(520px,calc(100% - 24px));max-height:86vh;overflow:auto}
+    .tabs{display:flex;border:1px solid #e3e6ea;border-radius:10px;overflow:hidden;margin-bottom:10px}
+    .tab{flex:1;text-align:center;padding:8px 10px;cursor:pointer;background:#f6f7f9}
+    .tab.active{background:#0b57d0;color:#fff;font-weight:700}
+    .section{display:none}.section.active{display:block}
+    .grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+    .field{display:flex;flex-direction:column;gap:6px}
+    .field label{font-size:12px;color:#333}
+    input,textarea{width:100%;border:1px solid #d7d7d7;border-radius:8px;padding:8px 10px;font:14px system-ui}
+    textarea{height:160px;resize:vertical}
+    .row{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+    button{height:36px;padding:0 12px;border:0;border-radius:8px;cursor:pointer;background:#0b57d0;color:#fff;font-weight:600}
+    button.ghost{background:#f3f5f8;color:#111}
+    .muted{color:#666;font-size:12px}
+    .legend{display:flex;gap:10px;align-items:center;margin:6px 0 8px;font-size:12px;color:#333}
+    .dot{width:10px;height:10px;border-radius:50%}
+    .dot.green{background:#1faa00;border:2px solid #0d5}
+    .dot.red{background:#e53935;border:2px solid #c62828}
+    .stats{margin-top:6px;font-size:13px;color:#111}
+    .ok{color:#0b7a3b;font-weight:700}.bad{color:#d93025;font-weight:700}
+    .badge{display:inline-block;padding:2px 8px;border-radius:999px;background:#eef;border:1px solid #99f;font-size:12px;margin-left:6px}
+    .collapsible-header{display:flex;align-items:center;justify-content:space-between;cursor:pointer;margin-bottom:8px;font-weight:700}
+    .chevron{transition:transform .2s ease}
+    .panel.collapsed .chevron{transform:rotate(-90deg)}
+    .collapsible-content{overflow:hidden;transition:max-height .22s ease, opacity .18s ease;max-height:1200px;opacity:1}
+    .panel.collapsed .collapsible-content{max-height:0;opacity:.0;pointer-events:none}
+    .collapsible-header:focus{outline:2px solid #0b57d0;outline-offset:2px;border-radius:8px}
+    .row.sticky{position:sticky;bottom:0;background:#fff;padding-bottom:6px}
+    @media (max-width:600px){
+      .panel{width:calc(100% - 24px)}
+    }
+    .agents-header{display:flex;align-items:center;justify-content:space-between;margin:6px 0}
+    .icon-btn{height:32px;width:32px;display:inline-flex;align-items:center;justify-content:center;border-radius:8px;border:1px solid #e3e6ea;background:#f6f7f9;color:#111;cursor:pointer}
+    .icon-btn:hover{background:#eef}
+    .agent-row{display:grid;grid-template-columns:1fr 1fr auto;gap:8px;align-items:end;margin-top:6px}
+    .agent-row .icon-btn{height:36px;width:36px}
+    .icon-btn svg{width:18px;height:18px;fill:#111}
+  </style>
+  <script>
+    // ===== Utils =====
+    const toFloat = v => Number.parseFloat(String(v??'').trim().replace(',', '.'));
+    const validLat = x => Number.isFinite(x) && x>=-90 && x<=90;
+    const validLon = x => Number.isFinite(x) && x>=-180 && x<=180;
+    function haversine(lat1, lon1, lat2, lon2){
+      const R = 6371000, rad = d => d*Math.PI/180;
+      const dphi = rad(lat2-lat1), dl = rad(lon2-lon1);
+      const a = Math.sin(dphi/2)**2 + Math.cos(rad(lat1))*Math.cos(rad(lat2))*Math.sin(dl/2)**2;
+      return 2*R*Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+    }
+    // -2,4801119 -54,7227453  (uma linha) -> [lat,lon]
+    function parseLine(line){
+      const s = String(line||'').trim().replace(/\s+/g,' ')
+                  .replaceAll(';',' ').replaceAll(',', '.');
+      const p = s.split(' ').filter(Boolean);
+      if (p.length < 2) return [NaN, NaN];
+      return [toFloat(p[0]), toFloat(p[1])];
+    }
+    const fmtMeters = m => (m<1000 ? `${m.toFixed(1)} m` : `${(m/1000).toFixed(3)} km`);
+
+    // ===== Pinos SVG estilizados (âncora correta) =====
+    const AGENT_COLORS = ['#e53935','#1e88e5','#8e24aa','#f9a825','#00acc1','#fb8c00'];
+    function createPinIcon(color){
+      const svg = `
+        <svg xmlns='http://www.w3.org/2000/svg' width='40' height='40' viewBox='0 0 24 24'>
+          <defs>
+            <linearGradient id='g' x1='0' y1='0' x2='0' y2='1'>
+              <stop offset='0%' stop-color='${color}' stop-opacity='1'/>
+              <stop offset='100%' stop-color='${color}' stop-opacity='0.85'/>
+            </linearGradient>
+          </defs>
+          <path d='M12 2a7 7 0 0 0-7 7c0 5.25 7 13 7 13s7-7.75 7-13a7 7 0 0 0-7-7z' fill='url(#g)' stroke='rgba(0,0,0,.25)' stroke-width='0.6'/>
+          <circle cx='12' cy='9.5' r='2.6' fill='#fff' stroke='rgba(0,0,0,.15)' stroke-width='0.6'/>
+        </svg>`;
+      return {
+        url: 'data:image/svg+xml;charset=UTF-8,' + encodeURIComponent(svg),
+        size: new google.maps.Size(40, 40),
+        scaledSize: new google.maps.Size(40, 40),
+        anchor: new google.maps.Point(20, 38)
+      };
+    }
+
+    // ===== Map state =====
+    let map;
+    function ensureMap(){
+      if (map) return map;
+      map = new google.maps.Map(document.getElementById('map'), {
+        center:{lat:-2.44,lng:-54.7}, zoom:12, mapTypeId:'roadmap'
+      });
+      return map;
+    }
+
+    // ===== Aba 1: Comparar 1×1 =====
+    let refMarker=null, refCircle=null;
+    let agMarkers=[], agLines=[], agInfos=[];
+    function setReference(latc, lonc){
+      const m = ensureMap();
+      if (refMarker) refMarker.setMap(null);
+      if (refCircle) refCircle.setMap(null);
+      refMarker = new google.maps.Marker({
+        position:{lat:latc,lng:lonc}, map:m, title:'Coordenada correta', icon: createPinIcon('#1faa00')
+      });
+      refCircle = new google.maps.Circle({
+        map:m, center:{lat:latc,lng:lonc}, radius:50,
+        fillOpacity:.10, fillColor:'#1faa00', strokeColor:'#1faa00', strokeOpacity:.7, strokeWeight:1
+      });
+      m.setCenter({lat:latc,lng:lonc});
+    }
+    function clearReference(){
+      if (refMarker) refMarker.setMap(null);
+      if (refCircle) refCircle.setMap(null);
+      refMarker = null; refCircle = null;
+    }
+    function clearOne(){
+      agMarkers.forEach(m=>m.setMap(null));
+      agLines.forEach(l=>l.setMap(null));
+      agInfos.forEach(i=>{ try{i.close();}catch(_){}});
+      agMarkers=[]; agLines=[]; agInfos=[];
+      const b1 = document.getElementById('tab1Badge');
+      if (b1){ b1.style.display='none'; b1.textContent=''; }
+    }
+    function clearOneUI(){
+      clearOne();
+      clearReference();
+      const ids = ['latc','lonc','lata1','lona1'];
+      ids.forEach(id=>{ const el = document.getElementById(id); if(el) el.value=''; });
+      const st = document.getElementById('oneStatus'); if (st) st.innerHTML='';
+      // reset lista de agentes adicionais (mantém Agente 1 fixo)
+      const cont = document.getElementById('agentsContainer');
+      if (cont){ cont.innerHTML=''; }
+    }
+    function getAgentsFromUI(){
+      const rows = Array.from(document.querySelectorAll('.agent-row'));
+      return rows.map(r=>({
+        lat: toFloat(r.querySelector('[data-role="agent-lat"]').value),
+        lon: toFloat(r.querySelector('[data-role="agent-lon"]').value)
+      }));
+    }
+    function plotOne(){
+      ensureMap();
+      const latc=toFloat(document.getElementById('latc').value);
+      const lonc=toFloat(document.getElementById('lonc').value);
+      if(!validLat(latc)||!validLon(lonc)){alert('Lat/Lon CORRETA inválida.');return;}
+      const baseAgent = { lat: toFloat(document.getElementById('lata1').value), lon: toFloat(document.getElementById('lona1').value) };
+      if(!validLat(baseAgent.lat)||!validLon(baseAgent.lon)){ alert('Lat/Lon do AGENTE 1 inválida.'); return; }
+      const agents = [baseAgent, ...getAgentsFromUI().filter(a=>validLat(a.lat)&&validLon(a.lon))];
+      // sempre teremos pelo menos o agente 1 válido
+
+      setReference(latc, lonc);
+      clearOne();
+
+      const bounds = new google.maps.LatLngBounds();
+      bounds.extend({lat:latc,lng:lonc});
+      let dentroCount=0, foraCount=0;
+      agents.forEach((a, idx)=>{
+        const mk = new google.maps.Marker({ position:{lat:a.lat,lng:a.lon}, map, title:`Agente ${idx+1}`, icon: createPinIcon(AGENT_COLORS[idx % AGENT_COLORS.length]) });
+        agMarkers.push(mk);
+        const ln = new google.maps.Polyline({ map, path:[{lat:latc,lng:lonc},{lat:a.lat,lng:a.lon}], strokeColor:'#1565c0', strokeOpacity:.85, strokeWeight:3 });
+        agLines.push(ln);
+        const d = haversine(latc,lonc,a.lat,a.lon);
+        const dentro = d <= 50; if (dentro) dentroCount++; else foraCount++;
+        const info = new google.maps.InfoWindow({
+          content:`<div style="font:13px system-ui">
+            <b>Agente ${idx+1}</b><span class="badge">${dentro?'Dentro 50 m':'Fora 50 m'}</span><br>
+            (${a.lat.toFixed(6)}, ${a.lon.toFixed(6)})<br>
+            Distância: <b>${fmtMeters(d)}</b>
+          </div>`
+        });
+        agInfos.push(info);
+        info.open({map, anchor:mk});
+        bounds.extend(mk.getPosition());
+      });
+
+      map.fitBounds(bounds, {top:90,right:40,bottom:40,left:40});
+      document.getElementById('oneStatus').innerHTML = `Agentes: Dentro 50 m: <b>${dentroCount}</b> — Fora 50 m: <b>${foraCount}</b>`;
+      const b1 = document.getElementById('tab1Badge');
+      if (b1){ b1.textContent = `D:${dentroCount} F:${foraCount}`; b1.style.display='inline-block'; }
+    }
+    function addAgentRow(){
+      const cont = document.getElementById('agentsContainer');
+      const idx = document.querySelectorAll('.agent-row').length + 1;
+      const row = document.createElement('div');
+      row.className = 'agent-row';
+      row.innerHTML = `
+        <div class="field"><label style="font-size:11px">Lat agente ${idx}</label><input data-role="agent-lat" placeholder="-2,44088637" aria-label="Latitude do agente ${idx}"></div>
+        <div class="field"><label style="font-size:11px">Lon agente ${idx}</label><input data-role="agent-lon" placeholder="-54,74673655" aria-label="Longitude do agente ${idx}"></div>
+        <button class="icon-btn" type="button" title="Remover agente" aria-label="Remover agente ${idx}" onclick="this.closest('.agent-row').remove()">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 7h12v2H6V7zm2 3h8l-1 9H9L8 10zm3-6h2l1 1h4v2H6V5h4l1-1z"/></svg>
+        </button>`;
+      cont.appendChild(row);
+    }
+
+    // ===== Aba 2: Plotar lista (independente) =====
+    let listMarkers=[];
+    function clearList(){
+      listMarkers.forEach(m=>m.setMap(null));
+      listMarkers=[];
+    }
+    function plotList(){
+      ensureMap();
+      clearList();
+      const lines = document.getElementById('lista').value.split('\n');
+      let ok=0, bad=0;
+      const b = new google.maps.LatLngBounds();
+      lines.forEach((line, idx)=>{
+        const [la, lo] = parseLine(line);
+        if(!validLat(la)||!validLon(lo)){ if(line.trim()) bad++; return; }
+        ok++;
+        const mk = new google.maps.Marker({
+          position:{lat:la,lng:lo}, map, title:`Ponto ${idx+1}`, icon: PIN_RED()
+        });
+        listMarkers.push(mk);
+        b.extend(mk.getPosition());
+      });
+      if (ok>0) map.fitBounds(b, {top:90,right:40,bottom:40,left:40});
+      document.getElementById('stats').innerHTML = `Plotados: <b>${ok}</b> &nbsp; Ignorados (inválidos): <b>${bad}</b>`;
+
+      const b2 = document.getElementById('tab2Badge');
+      if (b2){
+        if (ok>0 || bad>0){
+          b2.textContent = `P:${ok} Inv:${bad}`;
+          b2.style.display='inline-block';
+        } else {
+          b2.style.display='none';
+          b2.textContent='';
+        }
+      }
+    }
+    function clearListUI(){
+      document.getElementById('lista').value='';
+      document.getElementById('stats').innerHTML='';
+      clearList();
+      const b2 = document.getElementById('tab2Badge');
+      if (b2){ b2.style.display='none'; b2.textContent=''; }
+      const ta = document.getElementById('lista');
+      if (ta) ta.focus();
+    }
+
+    // ===== Tabs =====
+    function switchTab(id){
+      document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+      document.querySelectorAll('.section').forEach(s=>s.classList.remove('active'));
+      document.querySelector(`.tab[data-id="${id}"]`).classList.add('active');
+      document.getElementById(id).classList.add('active');
+      try{ localStorage.setItem('lastTab', id); }catch(_){ }
+      // ARIA: atualizar aria-selected/tabindex
+      document.querySelectorAll('[role="tab"]').forEach(el=>{
+        const isActive = el.getAttribute('data-id')===id;
+        el.setAttribute('aria-selected', String(isActive));
+        el.setAttribute('tabindex', isActive ? '0' : '-1');
+      });
+    }
+    function toggleCollapse(){
+      const panel = document.querySelector('.panel');
+      if (!panel) return;
+      const nowCollapsed = panel.classList.toggle('collapsed');
+      const hdr = document.getElementById('panelHeader');
+      if (hdr) hdr.setAttribute('aria-expanded', String(!nowCollapsed));
+      try{ localStorage.setItem('panelCollapsed', String(nowCollapsed)); }catch(_){ }
+    }
+    function headerKeyHandler(ev){
+      if(ev.key==='Enter' || ev.key===' '){ ev.preventDefault(); toggleCollapse(); }
+      if(ev.key==='Escape'){
+        const panel = document.querySelector('.panel');
+        if(panel && panel.classList.contains('collapsed')) toggleCollapse();
+      }
+    }
+    function tabKeyHandler(ev){
+      const tabs = Array.from(document.querySelectorAll('[role="tab"]'));
+      const currentIndex = tabs.findIndex(t=>t.getAttribute('aria-selected')==='true');
+      if (ev.key==='ArrowRight' || ev.key==='ArrowLeft'){
+        ev.preventDefault();
+        const dir = ev.key==='ArrowRight' ? 1 : -1;
+        let next = (currentIndex + dir + tabs.length) % tabs.length;
+        const nextId = tabs[next].getAttribute('data-id');
+        switchTab(nextId);
+        tabs[next].focus();
+      }
+    }
+    function init(){
+      ensureMap();
+      let defaultTab = 'tab1';
+      try{ defaultTab = localStorage.getItem('lastTab') || 'tab1'; }catch(_){ }
+      switchTab(defaultTab);
+      const panel = document.querySelector('.panel');
+      let collapsed = false;
+      try{ collapsed = (localStorage.getItem('panelCollapsed') === 'true'); }catch(_){ }
+      if (collapsed) panel.classList.add('collapsed'); else panel.classList.remove('collapsed');
+      const hdr = document.getElementById('panelHeader');
+      if (hdr) hdr.setAttribute('aria-expanded', String(!collapsed));
+      const cont = document.getElementById('agentsContainer');
+      if (cont && cont.querySelectorAll('.agent-row').length===0) addAgentRow();
+    }
+  </script>
+</head>
+<body>
+  <div class="panel">
+    <div id="panelHeader" class="collapsible-header" role="button" tabindex="0" aria-expanded="true" aria-controls="panelContent" onclick="toggleCollapse()" onkeydown="headerKeyHandler(event)" aria-label="Alternar conteúdo">
+      <div>Validação / Plotagem de Coordenadas</div>
+      <div class="chevron">▾</div>
+    </div>
+    <div id="panelContent" class="collapsible-content">
+      <div class="tabs" role="tablist" aria-label="Abas do painel">
+        <div id="tab1Tab" class="tab active" role="tab" aria-selected="true" tabindex="0" data-id="tab1" onclick="switchTab('tab1')" onkeydown="tabKeyHandler(event)">Comparar 1×1 <span id="tab1Badge" class="badge" style="display:none"></span></div>
+        <div id="tab2Tab" class="tab" role="tab" aria-selected="false" tabindex="-1" data-id="tab2" onclick="switchTab('tab2')" onkeydown="tabKeyHandler(event)">Plotar lista <span id="tab2Badge" class="badge" style="display:none"></span></div>
+      </div>
+
+      <!-- Aba 1 -->
+      <div id="tab1" class="section active" role="tabpanel" aria-labelledby="tab1Tab">
+        <div class="grid">
+          <div class="field"><label>Lat correta</label><input id="latc" placeholder="-2,440142851"></div>
+          <div class="field"><label>Lon correta</label><input id="lonc" placeholder="-54,746688425"></div>
+          <div class="field"><label>Lat agente 1</label><input id="lata1" placeholder="-2,44088637"></div>
+          <div class="field"><label>Lon agente 1</label><input id="lona1" placeholder="-54,74673655"></div>
+        </div>
+        <div class="agents-header">
+          <div class="muted">Agentes adicionais (opcional)</div>
+          <button class="icon-btn" type="button" title="Adicionar agente" aria-label="Adicionar agente" onclick="addAgentRow()">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 11V5h2v6h6v2h-6v6h-2v-6H5v-2h6z"/></svg>
+          </button>
+        </div>
+        <div id="agentsContainer"></div>
+        <div class="legend">
+          <span class="dot green"></span> Correta
+          <span class="dot red"></span> Agente
+        </div>
+        <div class="row sticky">
+          <button onclick="plotOne()">Plotar 1×1</button>
+          <button class="ghost" onclick="clearOneUI()">Limpar</button>
+        </div>
+        <div id="oneStatus" class="stats" role="status" aria-live="polite"></div>
+      </div>
+
+      <!-- Aba 2 -->
+      <div id="tab2" class="section" role="tabpanel" aria-labelledby="tab2Tab">
+        <div class="field">
+          <label>Coordenadas (uma por linha — <b>-2,4801119 -54,7227453</b>)</label>
+          <textarea id="lista" placeholder="-2,4801119 -54,7227453
+-2,480028 -54,722709
+-2,481000 -54,723000"></textarea>
+          <div class="muted">Aceita vírgula decimal e espaço entre lat/lon.</div>
+        </div>
+        <div class="row sticky">
+          <button onclick="plotList()">Plotar lista</button>
+          <button class="ghost" onclick="clearListUI()">Limpar</button>
+        </div>
+        <div id="stats" class="stats" role="status" aria-live="polite"></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="map"></div>
+  <script async src="https://maps.googleapis.com/maps/api/js?key=AIzaSyAw1mUSuPuXhwiBvGigVCsEghNJ9mpGlT0&callback=init"></script>
+</body>
+</html>
